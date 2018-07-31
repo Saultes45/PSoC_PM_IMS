@@ -14,7 +14,9 @@
 *
 *
 * Possible Improvements
-*
+* PUT all char like separators, etc as #define
+* Actually calculate and check the checksum
+* replace all tacom to tachom
 *
 * Notes
 *
@@ -32,6 +34,9 @@
 #define SOM_CHAR_SR	0x24 // '$' SR - Speed Request
 #define SOM_CHAR_IM	0x26 // '&' IM – Integrity Monitor
 #define SOM_CHAR_MC	0x23 // '#' MC – Manual Control (emergency procedure only, degraded state, IR is offline)
+
+#define SOC_CHAR	0x2a // '*' Start of checksum
+#define SEPARATOR_CHAR	0x2c // ',' Separate fields in messages
 
 #define EOM_CHAR_SR	0x0A // '\n'
 #define EMPTY_CHAR	0x00 // '\0'
@@ -84,10 +89,10 @@ typedef struct SensorData
     float   Temp_StarboardMotor;
     float   Temp_Ref;   
     
-	uint16   Tacom_PortMotor;
-    uint16   Tacom_StarboardMotor;
+	float   Tacom_PortMotor;
+    float   Tacom_StarboardMotor;
     
-	uint16   WC_FlowRate;
+	float   WC_FlowRate;
 	
 	//-----------------
 	
@@ -117,8 +122,6 @@ typedef struct SensorData
 	uint8   BallSwitch_Roll_State;
 	//batt voltage, current, flowmeter are already their own type
 
-	
-    
     //-----------------
 	
 	// indicates whether or not we have checked the state of the USV
@@ -156,7 +159,7 @@ void 	parse_MC(char message[RxBufferSize]);
 uint8   IsCharReady(void);
 char    GetRxChar(void);
 //SENSORS
-void readSensor(SensorData StructInNew, SensorData StructInOld);
+void readSensor(void);
 //ACTIONS
 void    Execute_SR(void);
 void    Execute_IM(uint8 VerboseLevel, SensorData StructIn);
@@ -173,8 +176,9 @@ uint8   BuffCompletellyFilled = 0; //just an indication parameter
 
 // My factory defaults for the struct
 // https://stackoverflow.com/questions/6891720/initialize-reset-struct-to-zero-null
-static const struct SensorData EmptyStruct = { STATE_REPEAT, 0, 0.0, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT,
-    STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT};
+static const struct SensorData EmptyStruct = { STATE_REPEAT, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0,
+    STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT,
+    STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT, STATE_REPEAT};
 //myStructVariable = EmptyStruct;
 
 //Previous (and complete) sensor data
@@ -191,6 +195,8 @@ CY_ISR_PROTO(MyRxInt); //Here "proto" means we put the ISR code at the END of th
 int main()
 {  
     InitEntireSystem();
+    char outputstring[40];
+    sprintf(outputstring,"%%%f,*FF\r\n", 15.3);
     
 	//===========================================================================================================================================================
 	// Beginning of the loop
@@ -236,7 +242,7 @@ int main()
                 	
                     case SOM_CHAR_IM  : // '&' IM – Integrity Monitor
                         
-                        RPImessage[0] = SOM_CHAR_SR;
+                        RPImessage[0] = SOM_CHAR_IM;
 				        cpt++;
                         
                         do //Depile and save a char from buff until \n found (we know it has arrived because of RPI_EOM_flag)
@@ -254,7 +260,7 @@ int main()
                     
                     case SOM_CHAR_MC  : // '#' MC – Manual Control (emergency procedure only, degraded state, IR is offline)
                         
-                        RPImessage[0] = SOM_CHAR_SR;
+                        RPImessage[0] = SOM_CHAR_MC;
 				        cpt++;
                         
                         do //Depile and save a char from buff until \n found (we know it has arrived because of RPI_EOM_flag)
@@ -279,7 +285,8 @@ int main()
 		}
 		else
 		{
-			readSensor(SD_new, SD_old);
+			readSensor();
+            CyDelay(100); // for simu only: slow down the process
 		}
 	}
 }// END OF MAIN
@@ -336,25 +343,81 @@ void parse_SR(char message[RxBufferSize])  // SR - Speed Request
 {
 	if (strstr(message, ",")) // Find the "," character in the message haystack
 	{
-        int64 temp1 =0;
-        int64 temp2 =0;
+        //Check checksum
+        const char *PATTERN1 = "*";
+        const char *PATTERN2 = ( char * )EOM_CHAR_SR; //"\n";
 
-		char *p = message;
+        char *target = NULL;
+        char *start, *end;
 
-		// get PWM1 order
-		p = strchr(p, '$')+1;
-		temp1 = atoi(p);
-		
-		// get PWM2 order
-		p = strchr(p, ',')+1;
-		temp2 = atoi(p);
-        
-        if (temp1 > -255 && temp1 < 255 && temp2 > -255 && temp2 < 255)
+        start = strstr( message, PATTERN1 );
+        if (start)
         {
-            RPiOrders.PWM_Right_Orders = (uint8)temp1;
-            RPiOrders.PWM_Left_Orders = (uint8)temp2;
+            // PATTERN1 has been found, check that the 3 following char are: F, F, and \n
+            start += 1;
+            if (*start == 'F')
+            {
+                start += 1;
+                if (*start == 'F')
+                {
+                    start += 1;
+                    if (*start == '\n')
+                    {
+                        target = ( char * )"FF";
+                    }
+                }
+            }
+//            start += strlen( PATTERN1 );
+//            end = strstr( message, PATTERN2 ); 
+//            if (*end == EOM_CHAR_SR)
+//            {
+////                target = ( char * )malloc( end - start + 1 );
+////                memcpy( target, start, end - start );
+////                target[end - start] = '\0';
+//                
+//                for (i = 0; i < (end - start); i++)
+//                {
+//                   number[i] = start[i];
+//                }
+//            }
         }
-		
+        else // There was no start of checksum found, probably bad message
+        {
+            CyDelayUs(1); //just for debug
+        }
+
+        if (strncmp(target, "FF", 2)== 0 ) // We found the checksum
+        {
+            int16 temp1 = 0;
+            int16 temp2 = 0;
+
+    		char *p = message;
+
+    		// get PWM1 order
+    		p = strchr(p, '$')+1;
+    		temp1 = atoi(p);
+    		
+    		// get PWM2 order
+    		p = strchr(p, ',')+1;
+    		temp2 = atoi(p);
+            
+            if (abs(temp1) < 255 && abs(temp2) < 255)
+            {
+                RPiOrders.PWM_Right_Orders = (uint8)temp1;
+                RPiOrders.PWM_Left_Orders = (uint8)temp2;
+            }
+            else // if the orders are outside range, stop the motors
+            {
+                RPiOrders.PWM_Right_Orders = 0u;
+                RPiOrders.PWM_Left_Orders = 0u;
+            }
+        }
+        else // if the orders are outside range, stop the motors
+        {
+            RPiOrders.PWM_Right_Orders = 0u;
+            RPiOrders.PWM_Left_Orders = 0u;
+        }
+        free( target );
 	}
 }
 
@@ -363,20 +426,129 @@ void parse_IM(char message[RxBufferSize]) // IM - Integrity monitor
     //The 1st thing is to find the desired verbose level
     
     uint8 DesiredVerboseLevel = VERBOSE_LEVEL_X;
-	char *p = message;
 
-	// get desired verbose level
-	p = strchr(p, '&')+1;
-	DesiredVerboseLevel = atoi(p);
-    DesiredVerboseLevel = 2;
-    SD_old.CheckComplete = STATE_OK;
+    //Check checksum
+    const char *PATTERN1 = "*";
+    const char *PATTERN2 = ( char * )EOM_CHAR_SR; //"\n";
+
+    char *target = NULL;
+    char *start, *end;
+
+    start = strstr( message, PATTERN1 );
+    if (start)
+    {
+        // PATTERN1 has been found, check that the 3 following char are: F, F, and \n
+        start += 1;
+        if (*start == 'F')
+        {
+            start += 1;
+            if (*start == 'F')
+            {
+                start += 1;
+                if (*start == '\n')
+                {
+                    target = ( char * )"FF";
+                }
+            }
+        }
+//            start += strlen( PATTERN1 );
+//            end = strstr( message, PATTERN2 ); 
+//            if (*end == EOM_CHAR_SR)
+//            {
+////                target = ( char * )malloc( end - start + 1 );
+////                memcpy( target, start, end - start );
+////                target[end - start] = '\0';
+//                
+//                for (i = 0; i < (end - start); i++)
+//                {
+//                   number[i] = start[i];
+//                }
+//            }
+    }
+    else // There was no start of checksum found, probably bad message
+    {
+        CyDelayUs(1); //just for debug
+    }
+
+
+    if (strncmp(target, "FF", 2) == 0) // We found the checksum
+    {
+        int16 temp1 = 0;
+        int16 temp2 = 0;
+
+		char *p = message;
+
+		// get desired verbose level
+		p = strchr(p, SOM_CHAR_IM) + 1;
+		DesiredVerboseLevel = atoi(p);
+        
+        if ((DesiredVerboseLevel != VERBOSE_LEVEL_X) & (DesiredVerboseLevel != VERBOSE_LEVEL_1) &
+        (DesiredVerboseLevel != VERBOSE_LEVEL_2) & (DesiredVerboseLevel != VERBOSE_LEVEL_3))
+        {
+            DesiredVerboseLevel = VERBOSE_LEVEL_X;
+        }
+    }
+    
+    free( target );
+    
+    SD_old.CheckComplete = STATE_OK; // for simu only
     Execute_IM(DesiredVerboseLevel, SD_old);
-    SD_old.CheckComplete = STATE_REPEAT;
+    SD_old.CheckComplete = STATE_REPEAT; // for simu only
 }
 
 void parse_MC(char message[RxBufferSize])
 {
-    CyDelay(100);
+    if (strstr(message, ",")) // Find the "," character in the message haystack
+	{
+        //Check checksum
+        const char *PATTERN1 = "*";
+        const char *PATTERN2 = ( char * )EOM_CHAR_SR; //"\n";
+
+        char *target = NULL;
+        char *start, *end;
+
+        start = strstr( message, PATTERN1 );
+        if (start)
+        {
+            // PATTERN1 has been found, check that the 3 following char are: F, F, and \n
+            start += 1;
+            if (*start == 'F')
+            {
+                start += 1;
+                if (*start == 'F')
+                {
+                    start += 1;
+                    if (*start == '\n')
+                    {
+                        target = ( char * )"FF";
+                    }
+                }
+            }
+//            start += strlen( PATTERN1 );
+//            end = strstr( message, PATTERN2 ); 
+//            if (*end == EOM_CHAR_SR)
+//            {
+////                target = ( char * )malloc( end - start + 1 );
+////                memcpy( target, start, end - start );
+////                target[end - start] = '\0';
+//                
+//                for (i = 0; i < (end - start); i++)
+//                {
+//                   number[i] = start[i];
+//                }
+//            }
+        }
+        else // There was no start of checksum found, probably bad message
+        {
+            CyDelayUs(1); //just for debug
+        }
+
+        if (strncmp(target, "FF", 2)== 0 ) // We found the checksum
+        {
+            CyDelay(100);
+        }
+        free( target );
+	}
 }
 
 void InitEntireSystem (void)
@@ -408,7 +580,9 @@ void    Execute_SR(void)  // Modify motor speed, //OPTIMISE w/Global
 
 void    Execute_IM(uint8 VerboseLevel, SensorData StructIn) // Answer the RPi, //OPTIMISE w/Global
 {
-    char outputstring[40];
+    char outputstring[90];
+    memset(outputstring, 0, sizeof(outputstring)); // clean the message field
+    
     
     //Before Answering we check that the data is ready
     if (StructIn.CheckComplete == STATE_OK)
@@ -421,69 +595,73 @@ void    Execute_IM(uint8 VerboseLevel, SensorData StructIn) // Answer the RPi, /
         | Verbose 3 | All Sensor Data              |
         ---------------------------------------------
     */
-    
-    switch(VerboseLevel) 
-    {
-        case VERBOSE_LEVEL_X  :
-            sprintf(outputstring,"%%%i*FF \n", VerboseLevel); //%% means print '%'
-            UART_RPI_PutString(outputstring);
-            break; /* optional */
-        
-        case VERBOSE_LEVEL_1  :
-            sprintf(outputstring,"%%%i,%i*FF \n", VerboseLevel, StructIn.USV_State); //%% means print '%'
-            UART_RPI_PutString(outputstring);
-            break; /* optional */
-    	
-        case VERBOSE_LEVEL_2  :
-            /*
-            Overall criticity (int)
-            Water ingress detected (boolean), 0 is NO water (ok) 1 is water detected (not ok)
-            Temperature of the center
-            Temperature of the right motor
-            Temperature of the left motor
-            Battery level
-            Speed of right motor as count of the IR sensor
-            Speed of left motor as count of the IR sensor
-            Flow rate
-            */
+        switch(VerboseLevel) 
+        {
+            case VERBOSE_LEVEL_X  :
+                sprintf(outputstring,"%%%i*FF\r\n", VerboseLevel); //%% means print '%'
+                UART_RPI_PutString(outputstring);
+                break; /* optional */
+            
+            case VERBOSE_LEVEL_1  : 
+                /*
+                Just the state of the USV
+                */
+                sprintf(outputstring,"%%%i,%i*FF\r\n", VerboseLevel, StructIn.USV_State); //%% means print '%'
+                UART_RPI_PutString(outputstring);
+                break; /* optional */
+        	
+            case VERBOSE_LEVEL_2  :
+                /*
+                Just the state of the TYPE of sensors
+                uint8   WI_State;
+            	uint8	Tachom_State;	
+                uint8   TempState;
+                uint8   BatteryVoltage_State;
+                uint8   BatteryAmperage_State;
+                uint8   WC_FlowRate_State;
+                */
 
-            sprintf(outputstring,"%%%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i*FF\r\n", VerboseLevel, StructIn.USV_State, StructIn.WI_State, StructIn.Temp_Ref_State, 
-                StructIn.Temp_StarboardMotor_State, StructIn.Tacom_PortMotor_State, StructIn. BatteryVoltage_State, StructIn. BatteryAmperage_State,
-                StructIn.Tacom_StarboardMotor_State, StructIn.Tacom_PortMotor_State, StructIn.WC_FlowRate_State); //%% means print '%'
-            UART_RPI_PutString(outputstring);
-            break; /* optional */
-        
-        case VERBOSE_LEVEL_3  :
-            /*
-            Overall criticity (int)
-            Water ingress detected bow (boolean), 0 is NO water (ok) 1 is water detected (not ok)
-            Water ingress detected stern (boolean), 0 is NO water (ok) 1 is water detected (not ok)
-            Water ingress detected starboard (boolean), 0 is NO water (ok) 1 is water detected (not ok)
-            Water ingress detected port (boolean), 0 is NO water (ok) 1 is water detected (not ok)
-            Temperature of the center
-            Temperature of the right motor
-            Temperature of the left motor
-            Battery level
-            Instant current
-            Speed of right motor as count of the IR sensor
-            Speed of left motor as count of the IR sensor
-            flow rate speed
-            */
-            sprintf("%%%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i*FF\r\n", VerboseLevel, StructIn.USV_State, StructIn.WI_bow, StructIn.WI_bow,
-            StructIn.WI_bow,StructIn.WI_bow,StructIn.WI_bow,StructIn.WI_bow,StructIn.WI_bow,StructIn.WI_bow,StructIn.WI_bow); //%% means print '%'
-            UART_RPI_PutString(outputstring);
-            break; /* optional */
-      
-        default : 
-            CyDelayUs(1); //Do nothing
-    }
+                sprintf(outputstring,"%%%i,%i,%i,%i,%i,%i,%i*FF\r\n", VerboseLevel, StructIn.WI_State, StructIn.Tachom_State, StructIn.TempState, 
+                    StructIn.BatteryVoltage_State, StructIn.BatteryAmperage_State, StructIn.WC_FlowRate_State); //%% means print '%'
+                UART_RPI_PutString(outputstring);
+                break; /* optional */
+            
+            case VERBOSE_LEVEL_3  :
+                /*
+                
+                Water ingress detected bow (boolean), 0 is NO water (ok) 1 is water detected (not ok)
+                Water ingress detected stern (boolean), 0 is NO water (ok) 1 is water detected (not ok)
+                Water ingress detected starboard (boolean), 0 is NO water (ok) 1 is water detected (not ok)
+                Water ingress detected port (boolean), 0 is NO water (ok) 1 is water detected (not ok)
+                
+                Temperature of the center
+                Temperature of the right motor
+                Temperature of the left motor
+                
+                Battery level
+                Instant current
+                
+                Speed of right motor as count of the IR sensor
+                Speed of left motor as count of the IR sensor
+                
+                flow rate speed
+                */
+                sprintf(outputstring,"%%%i,%i,%i,%i,%i,%5.2f,%5.2f,%5.2f,%5.1f,%5.2f,%5.1f,%5.1f*FF\r\n", VerboseLevel, StructIn.WI_bow, StructIn.WI_stern, StructIn.WI_starboard,
+                    StructIn.WI_port, StructIn.Temp_Ref, StructIn.Temp_StarboardMotor, StructIn.Temp_PortMotor, StructIn.BatteryVoltage, StructIn.BatteryAmperage,
+                    StructIn.Tacom_StarboardMotor, StructIn.Tacom_PortMotor); //%% means print '%'
+                UART_RPI_PutString(outputstring);
+                //break; /* optional */
+          
+            default : 
+                // If we can't recognise the VerboseLevel
+                CyDelayUs(1); //Do nothing
+        }
     }
     else //Ask the RPI to repeat because not ready
     {
-        sprintf(outputstring,"%%%i,%i*FF \n", VerboseLevel, STATE_REPEAT); //%% means print '%'
+        sprintf(outputstring,"%%%i,%i*FF\r\n", VerboseLevel, STATE_REPEAT); //%% means print '%'
         UART_RPI_PutString(outputstring);
     }
-    
 }
 
 void    Execute_MC(void) // Modify motor speed
@@ -492,23 +670,36 @@ void    Execute_MC(void) // Modify motor speed
 }
 
 
-void readSensor(SensorData StructInNew, SensorData StructInOld) //OPTIMISE w/Global
+void readSensor(void) //OPTIMISE w/Global
 {
     //Put new in old IF it was complete
-    if (StructInNew.CheckComplete)
+    if (SD_new.CheckComplete)
     {
-        StructInOld = StructInNew; //Replace all the fields of the OLD struct with the NEW one 
-        StructInNew = EmptyStruct; //Clean the new struct
+        SD_old = SD_new; //Replace all the fields of the OLD struct with the NEW one 
+        SD_new = EmptyStruct; //Clean the new struct
     }
     
-    // Read input
-    StructInNew.DataGatheringComplete = 1;
+    // Read input : Raw data from the sensors, for simu only
+    SD_new.WI_bow					= WI_BOW_CURRENTDATA	        ;  //head
+    SD_new.WI_stern				    = WI_STERN_CURRENTDATA	    ;  //bottom
+    SD_new.WI_starboard			    = WI_PORT_CURRENTDATA	        ; //right	
+    SD_new.WI_port					= WI_STARBOARD_CURRENTDATA	;   //left
+    SD_new.BatteryVoltage			= BATTERY_VOLATGE_CURRENTDATA	;
+    SD_new.BatteryAmperage			= BATTERY_AMPERAGE_CURRENTDATA;
+    SD_new.Temp_PortMotor			= THEMAL_PORT_CURRENTDATA	     ;
+    SD_new.Temp_StarboardMotor		= THEMAL_STARTBOARD_CURRENTDATA;
+    SD_new.Temp_Ref				    = THEMAL_CENTER_CURRENTDATA	 ;   
+    SD_new.Tacom_PortMotor			= WC_FLOWRATE_CURRENTDATA		;
+    SD_new.Tacom_StarboardMotor	    = TACOM_STARTBOARD_CURRENTDATA;	
+    SD_new.WC_FlowRate				= TACOM_PORT_CURRENTDATA	     ;
+    
+    SD_new.DataGatheringComplete = 1;
     
 	//Combine per sensor type
-	StructInNew.DataComparisionComplete = 1;
+	SD_new.DataComparisionComplete = 1;
     
     //Calculate the state of the USV
-    StructInNew.CheckComplete = 1;
+    SD_new.CheckComplete = 1;
     
 }
 
